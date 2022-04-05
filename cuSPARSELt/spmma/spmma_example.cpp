@@ -50,6 +50,12 @@
 #include <cusparseLt.h>       // cusparseLt header
 #include <cstdio>             // printf
 #include <cstdlib>            // std::rand
+#include "sputnik/cuda_utils.h"
+#include "sputnik/matrix_utils.h"
+#include "sputnik/spmm/cuda_spmm.h"
+#include "sputnik/spmm/spmm_config.h"
+#include "sputnik/test_utils.h"
+#include "time.h"
 
 #define CHECK_CUDA(func)                                                       \
 {                                                                              \
@@ -72,8 +78,110 @@
 }
 
 constexpr int EXIT_UNSUPPORTED = 2;
+// for finegrained kernels
+int32_t * row_idx, *col_idx, *d_row_idx, *d_col_idx, *row_swizzle, *d_row_swizzle;
+int32_t row_idx_size, col_idx_size, values_size;
+float * values, *d_values;
+void init(float * ptr, size_t length, float sparsity)
+{
+    // lock the random seed for
+    srand (1);
+    for (int i = 0; i < length; i++)
+    {
+        float pro = static_cast<float>(rand()) / static_cast<float>(RAND_MAX);
+        //printf("pro: %f\n", pro);
+        if (pro < sparsity)
+        {
+            ptr[i] = 0.0;
+        }
+        else
+        {
+            ptr[i] = static_cast<float>(rand()) / static_cast<float>(RAND_MAX);
+        }
+    }
+}
+void SortedRowSwizzle(int rows, int *row_offsets, int *row_indices) {
+  // Create our unsorted row indices.
+  std::vector<int> swizzle_staging(rows);
+  std::iota(swizzle_staging.begin(), swizzle_staging.end(), 0);
 
-int main(void) {
+  // Argsort the row indices based on their length.
+  std::sort(swizzle_staging.begin(), swizzle_staging.end(),
+            [&row_offsets](int idx_a, int idx_b) {
+              int length_a = row_offsets[idx_a + 1] - row_offsets[idx_a];
+              int length_b = row_offsets[idx_b + 1] - row_offsets[idx_b];
+              return length_a > length_b;
+            });
+
+  // Copy the ordered row indices to the output.
+  std::memcpy(row_indices, swizzle_staging.data(), sizeof(int) * rows);
+}
+
+int convert_csr(float * ptr, int32_t row, int32_t col, int32_t * &row_idx, int32_t * &col_idx, float * &values)
+{
+    auto v_row_idx = std::make_shared<vector<int32_t>>();
+    auto v_col_idx = std::make_shared<vector<int32_t>>();
+    auto v_values = std::make_shared<vector<float>>();
+
+    for (int i = 0; i < row; i++)
+    {
+        v_row_idx->push_back(v_values->size());
+        for (int j = 0; j < col; j++)
+        {
+            size_t pos = i * col + j;
+            if (ptr[pos] < 1e-8)
+            {
+                // sparsity
+                continue;
+            }
+            else
+            {
+                v_values->push_back(ptr[pos]);
+                v_col_idx->push_back(j);
+            }
+        }
+    }
+    v_row_idx->push_back(v_values->size());
+    row_idx_size = sizeof(int32_t)*v_row_idx->size();
+    col_idx_size = sizeof(int32_t)*v_col_idx->size();
+    values_size = sizeof(float)*v_values->size();
+    printf("values_size: %d\n", values_size);
+    row_idx = (int32_t*) malloc(row_idx_size);
+    col_idx = (int32_t*) malloc(col_idx_size);
+    values = (float*) malloc(values_size);
+    memcpy(row_idx, v_row_idx->data(), row_idx_size);
+    memcpy(col_idx, v_col_idx->data(), col_idx_size);
+    memcpy(values, v_values->data(), values_size);
+    return v_valuse->size();
+}
+
+void transform(float* A, float*A1, float*A2, int length){
+    // split the matrix A into A1 and A2
+    // A1 is for the saprse tensor core, A2 is for the finegrained sparse kernel
+    memset(A1, 0, sizeof(float)*length);
+    memset(A2, 0, sizeof(float)*length);
+    assert(length%4==0);
+    int nnz=0;
+    for(int i=0; i<length/4;i++){
+        int start = i*4;
+        int end= start+4;
+        nnz=0;
+        for(int j=start; j<end; j++){
+            if(A[j]!=0){
+                if(nnz<2){
+                    A1[j]=A[j];
+                }else{
+                    A2[j]=A[j];
+                }
+                nnz++;
+            }
+        }
+    }
+}
+
+int main(int argc, char* argv) {
+    float sparsity_ratio = atof(argv[1]);
+    printf("Sparsity Ratio=%f\n", sparsity_ratio);
     int major_cc, minor_cc;
     CHECK_CUDA( cudaDeviceGetAttribute(&major_cc,
                                        cudaDevAttrComputeCapabilityMajor, 0) )
@@ -116,25 +224,44 @@ int main(void) {
     auto     B_size         = B_height * ldb * sizeof(float);
     auto     C_size         = C_height * ldc * sizeof(float);
     float hA[m * k];
+    float hA1[m * k];
+    float hA2[m * k];
     float hB[k * n];
     float hC[m * n] = {};
-    for (int i = 0; i < m * k; i++)
-        hA[i] = static_cast<float>(static_cast<float>(std::rand() % 10));
-    for (int i = 0; i < k * n; i++)
-        hB[i] = static_cast<float>(static_cast<float>(std::rand() % 10));
+
+    init(hA, m*k, sparsity_ratio);
+    init(hB, k*n, 0);
+    transform(hA, hA1, hA2, m*k);
+    // build the index for the finegrained kernel
+    convert_csr(hA2, m,k, row_idx, col_idx, values);
+    CHECK_CUDA(cudaMalloc(&d_row_idx, row_idx_size));
+    CHECK_CUDA(cudaMalloc(&d_col_idx, col_idx_size));
+    CHECK_CUDA(cudaMalloc(&d_values, values_size));
+    CHECK_CUDA(cudaMemcpy(d_row_idx, row_idx, row_idx_size, cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(d_col_idx, col_idx, col_idx_size, cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(d_values, values, values_size, cudaMemcpyHostToDevice));
+    row_swizzle = (int *) malloc(sizeof(int) * m);
+    CHECK_CUDA(cudaMalloc(&d_row_swizzle, sizeof(int)*m));
+    SortedRowSwizzle(m, row_idx, row_swizzle);
+    CHECK_CUDA(cudaMemcpy(d_row_swizzle, row_swizzle, sizeof(int)*m, cudaMemcpyHostToDevice));
+    int fine_nnz = values_size / sizeof(float);
+
     float alpha = 1.0f;
-    float beta  = 0.0f;
+    float beta  = 1.0f;
     //--------------------------------------------------------------------------
     // Device memory management
-    float *dA, *dB, *dC, *dD, *dA_compressed;
+    float *dA, dA1, dA2, *dB, *dC, *dD, *dA_compressed;
     int    *d_valid;
     CHECK_CUDA( cudaMalloc((void**) &dA, A_size) )
+    CHECK_CUDA( cudaMalloc((void**) &dA1, A_size) )
+    CHECK_CUDA( cudaMalloc((void**) &dA2, A_size) )
     CHECK_CUDA( cudaMalloc((void**) &dB, B_size) )
     CHECK_CUDA( cudaMalloc((void**) &dC, C_size) )
     CHECK_CUDA( cudaMalloc((void**) &d_valid, sizeof(d_valid)) )
     dD = dC;
 
-    CHECK_CUDA( cudaMemcpy(dA, hA, A_size, cudaMemcpyHostToDevice) )
+    CHECK_CUDA( cudaMemcpy(dA1, hA1, A_size, cudaMemcpyHostToDevice) )
+    CHECK_CUDA( cudaMemcpy(dA2, hA2, A_size, cudaMemcpyHostToDevice) )
     CHECK_CUDA( cudaMemcpy(dB, hB, B_size, cudaMemcpyHostToDevice) )
     CHECK_CUDA( cudaMemcpy(dC, hC, C_size, cudaMemcpyHostToDevice) )
     //--------------------------------------------------------------------------
@@ -180,9 +307,9 @@ int main(void) {
                                              workspace_size) )
     //--------------------------------------------------------------------------
     // Prune the A matrix (in-place) and check the correcteness
-    CHECK_CUSPARSE( cusparseLtSpMMAPrune(&handle, &matmul, dA, dA,
-                                         CUSPARSELT_PRUNE_SPMMA_TILE, stream) )
-    CHECK_CUSPARSE( cusparseLtSpMMAPruneCheck(&handle, &matmul, dA,
+    // CHECK_CUSPARSE( cusparseLtSpMMAPrune(&handle, &matmul, dA, dA,
+    //                                      CUSPARSELT_PRUNE_SPMMA_TILE, stream) )
+    CHECK_CUSPARSE( cusparseLtSpMMAPruneCheck(&handle, &matmul, dA1,
                                               d_valid, stream) )
     int is_valid;
     CHECK_CUDA( cudaMemcpyAsync(&is_valid, d_valid, sizeof(d_valid),
@@ -199,7 +326,7 @@ int main(void) {
                                                   &compressed_size) )
     CHECK_CUDA( cudaMalloc((void**) &dA_compressed, compressed_size) )
 
-    CHECK_CUSPARSE( cusparseLtSpMMACompress(&handle, &plan, dA,
+    CHECK_CUSPARSE( cusparseLtSpMMACompress(&handle, &plan, dA1,
                                             dA_compressed, stream) )
     //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     // Search the best kernel
@@ -218,18 +345,21 @@ int main(void) {
     //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     // Perform the matrix multiplication
     float ms_total;
+    int n_iter = 1000;
     cudaEvent_t start, stop, start_i, stop_i;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
     cudaEventRecord(start);
-    for(int i=0;i<1000;i++)
-    CHECK_CUSPARSE( cusparseLtMatmul(&handle, &plan, &alpha, dA_compressed, dB,
-                                     &beta, dC, dD, d_workspace, streams,
-                                     num_streams) )
+    for(int i=0;i<n_iter;i++){
+        CHECK_CUDA(CudaSpmm(m ,k, n, fine_nnz, d_row_swizzle, d_values, d_row_idx, d_col_idx, dB, dC, 0));
+        CHECK_CUSPARSE( cusparseLtMatmul(&handle, &plan, &alpha, dA_compressed, dB,
+                                        &beta, dC, dD, d_workspace, streams,
+                                        num_streams) )
+    }
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
     cudaEventElapsedTime(&ms_total, start, stop);
-    printf("Timecost: %f ms\n",ms_total/1000);
+    printf("Timecost: %f ms\n",ms_total/n_iter);
     //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     // destroy plan and handle
     CHECK_CUSPARSE( cusparseLtMatDescriptorDestroy(&matA) )
