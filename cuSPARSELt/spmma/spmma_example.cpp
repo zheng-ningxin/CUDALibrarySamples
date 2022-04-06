@@ -53,10 +53,10 @@
 #include "sputnik/cuda_utils.h"
 #include "sputnik/matrix_utils.h"
 #include "sputnik/spmm/cuda_spmm.h"
-#include "sputnik/spmm/spmm_config.h"
-#include "sputnik/test_utils.h"
 #include "time.h"
-
+#include <vector>
+using namespace std;
+using namespace sputnik;
 #define CHECK_CUDA(func)                                                       \
 {                                                                              \
     cudaError_t status = (func);                                               \

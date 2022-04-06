@@ -59,9 +59,10 @@ set(CMAKE_CXX_EXTENSIONS         OFF)
 set(CMAKE_CUDA_STANDARD          14)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_EXTENSIONS        OFF)
-set(CUSPARSELT_PATH /home/quzha/libcusparse_lt)
-set(CUDA_TOOLKIT_PATH  /usr/local/cuda)
-
+set(CUSPARSELT_PATH "/root/libcusparse_lt")
+set(CUDA_TOOLKIT_PATH  "/usr/local/cuda")
+set(SPUTNIK_ROOT "/root/sputnik")
+SET(CUDA_ARCH "-gencode arch=compute_80,code=sm_80" CACHE STRING "target architecture")
 string(REPLACE "/bin/nvcc" "" CUDA_TOOLKIT_PATH ${CMAKE_CUDA_COMPILER})
 if (${CMAKE_HOST_SYSTEM_PROCESSOR} STREQUAL "aarch64" AND
     ${CMAKE_SYSTEM_NAME} STREQUAL "Linux")
@@ -71,40 +72,33 @@ elseif (${CMAKE_HOST_SYSTEM_PROCESSOR} STREQUAL "x86_64" AND
     set(OS_ARCH_NVRTC "x86_64-linux")
 endif()
 set(NVRTC_SHARED ${CUDA_TOOLKIT_PATH}/targets/${OS_ARCH_NVRTC}/lib/libnvrtc.so)
+set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} ${CUDA_ARCH}")
+# set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS}  -ftemplate-depth=4096 -gencode arch=compute_60,code=sm_60 -gencode arch=compute_61,code=sm_61 -gencode arch=compute_70,code=sm_70 -gencode arch=compute_75,code=sm_75")
+set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -O2")
+
+
 
 add_executable(${ROUTINE}_example)
-add_executable(${ROUTINE}_example_static)
 
 target_sources(${ROUTINE}_example
-    PUBLIC ${PROJECT_SOURCE_DIR}/${ROUTINE}_example.cpp
+    PUBLIC ${PROJECT_SOURCE_DIR}/${ROUTINE}_example.cu
 )
 
-target_sources(${ROUTINE}_example_static
-    PUBLIC ${PROJECT_SOURCE_DIR}/${ROUTINE}_example.cpp
-)
 
 target_include_directories(${ROUTINE}_example
     PUBLIC ${CUDA_TOOLKIT_PATH}/include
     PUBLIC ${CUSPARSELT_PATH}/include
+    PUBLIC ${SPUTNIK_ROOT}
+    PUBLIC ${SPUTNIK_ROOT}/third_party/abseil-cpp
 )
 
-target_include_directories(${ROUTINE}_example_static
-    PUBLIC ${CUDA_TOOLKIT_PATH}/include
-    PUBLIC ${CUSPARSELT_PATH}/include
-)
 
 target_link_libraries(${ROUTINE}_example
-    PUBLIC cudart
-    PUBLIC cusparse
     PUBLIC ${CUSPARSELT_PATH}/lib64/libcusparseLt.so
     PUBLIC ${NVRTC_SHARED}
-)
-
-target_link_libraries(${ROUTINE}_example_static
+    PUBLIC ${SPUTNIK_ROOT}/build/sputnik/libspmm.so
+    PUBLIC ${SPUTNIK_ROOT}/build/third_party/abseil-cpp
     PUBLIC cudart
     PUBLIC cusparse
-    PUBLIC -Wl,--whole-archive ${CUSPARSELT_PATH}/lib64/libcusparseLt_static.a
-           -Wl,--no-whole-archive
-    PUBLIC ${NVRTC_SHARED}
-    PUBLIC ${CMAKE_DL_LIBS}
 )
+
