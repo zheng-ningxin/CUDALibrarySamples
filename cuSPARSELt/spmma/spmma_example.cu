@@ -160,15 +160,15 @@ void transform(float* A, float*A1, float*A2, int length){
     // A1 is for the saprse tensor core, A2 is for the finegrained sparse kernel
     memset(A1, 0, sizeof(float)*length);
     memset(A2, 0, sizeof(float)*length);
-    assert(length%4==0);
+    assert(length%2==0);
     int nnz=0;
-    for(int i=0; i<length/4;i++){
-        int start = i*4;
-        int end= start+4;
+    for(int i=0; i<length/2;i++){
+        int start = i*2;
+        int end= start+2;
         nnz=0;
         for(int j=start; j<end; j++){
             if(A[j]!=0){
-                if(nnz<2){
+                if(nnz<1){
                     A1[j]=A[j];
                 }else{
                     A2[j]=A[j];
@@ -179,23 +179,10 @@ void transform(float* A, float*A1, float*A2, int length){
     }
 }
 
-int main() {
-    //const char * s_sparsity=argv[1];
-    puts("debug point 1\n");
-    float sparsity_ratio = 0.5;
+int main(int argc, char*argv[]) {
+    float sparsity_ratio = atof(argv[1]);
     printf("Sparsity Ratio=%f\n", sparsity_ratio);
     int major_cc, minor_cc;
-    CHECK_CUDA( cudaDeviceGetAttribute(&major_cc,
-                                       cudaDevAttrComputeCapabilityMajor, 0) )
-    CHECK_CUDA( cudaDeviceGetAttribute(&minor_cc,
-                                       cudaDevAttrComputeCapabilityMinor, 0) )
-    if (!(major_cc == 8 && minor_cc == 0) &&
-        !(major_cc == 8 && minor_cc == 6)) {
-        std::printf("\ncusparseLt is supported only on GPU devices with"
-                    " compute capability == 8.0, 8.6 current: %d.%d\n\n",
-                     major_cc, minor_cc);
-        return EXIT_UNSUPPORTED;
-    }
     // Host problem definition, row-major order
     constexpr int m     = 1024; // bigger sizes may require dynamic allocations
     constexpr int n     = 1024; // bigger sizes may require dynamic allocations
@@ -266,6 +253,17 @@ int main() {
     CHECK_CUDA( cudaMemcpy(dA2, hA2, A_size, cudaMemcpyHostToDevice) )
     CHECK_CUDA( cudaMemcpy(dB, hB, B_size, cudaMemcpyHostToDevice) )
     CHECK_CUDA( cudaMemcpy(dC, hC, C_size, cudaMemcpyHostToDevice) )
+    for(int i=0;i<m*k/2;i++){
+    	int start = i*2;
+	int end = start+2;
+	int cnt=0;
+	for(int j=start;j<end;j++){
+	    if(hA1[j]!=0){
+	    	cnt++;
+	    }
+	}
+	//printf("%d\n",cnt);
+    }
     //--------------------------------------------------------------------------
     cusparseLtHandle_t             handle;
     cusparseLtMatDescriptor_t      matA, matB, matC;
@@ -372,7 +370,7 @@ int main() {
     //--------------------------------------------------------------------------
     // device result check
     // matrix A has been pruned
-    CHECK_CUDA( cudaMemcpy(hA, dA, A_size, cudaMemcpyDeviceToHost) )
+    //CHECK_CUDA( cudaMemcpy(hA, dA, A_size, cudaMemcpyDeviceToHost) )
     CHECK_CUDA( cudaMemcpy(hC, dC, C_size, cudaMemcpyDeviceToHost) )
 
     bool A_std_layout = (is_rowmajor != isA_transposed);
@@ -389,7 +387,8 @@ int main() {
                             static_cast<float>(hB[posB]);   // [k][j]
             }
             auto posC       = (is_rowmajor) ? i * ldc + j : i + j * ldc;
-            hC_result[posC] = sum;  // [i][j]
+            //printf("sum:%f \n",sum);
+	    hC_result[posC] = sum;  // [i][j]
         }
     }
     // host-device comparison
@@ -399,7 +398,7 @@ int main() {
             auto pos          = (is_rowmajor) ? i * ldc + j : i + j * ldc;
             auto device_value = static_cast<float>(hC[pos]);
             auto host_value   = hC_result[pos];
-            if (device_value != host_value) {
+            if (fabs(device_value - host_value)/host_value>1e-3) {
                 // direct floating point comparison is not reliable
                 std::printf("(%d, %d):\t%f vs. %f\n",
                             i, j, host_value, device_value);
