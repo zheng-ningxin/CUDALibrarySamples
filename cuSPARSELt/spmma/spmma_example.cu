@@ -179,9 +179,10 @@ void transform(float* A, float*A1, float*A2, int length){
     }
 }
 
-int main(int argc, char* argv[]) {
+int main() {
     //const char * s_sparsity=argv[1];
-    float sparsity_ratio = atof(argv[1]);
+    puts("debug point 1\n");
+    float sparsity_ratio = 0.5;
     printf("Sparsity Ratio=%f\n", sparsity_ratio);
     int major_cc, minor_cc;
     CHECK_CUDA( cudaDeviceGetAttribute(&major_cc,
